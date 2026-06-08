@@ -79,7 +79,7 @@ s = m:section(TypedSection, "alpine-fan-control", translate("Settings"))
 s.addremove = false
 s.anonymous = true
 
-e = s:option(Flag, "enable", translate("Enabled"), translate("Enables or disables the fan control daemon."))
+e = s:option(Flag, "enable", translate("Enabled"), translate("Start or stop the fan control daemon."))
 e.rmempty = false
 function e.write(self, section, value)
     if value == "1" then
@@ -90,70 +90,82 @@ function e.write(self, section, value)
     return Flag.write(self, section, value)
 end
 
-dbg = s:option(Flag, "debug", translate("Debug"), translate("Enables or disables debugging output."))
+dbg = s:option(Flag, "debug", translate("Debug"), translate("Log debug messages to syslog."))
 dbg.datatype = "uinteger"
 dbg.default = "0"
 dbg.rmempty = false
 dbg.optional = false
 
-min_temp = s:option(Value, "min_temp", translate("min_temp"), translate("Temperature for minimum fan state (Celsius)"))
-min_temp.datatype = "uinteger"
-min_temp.default = "40"
+min_temp = s:option(Value, "min_temp", translate("min_temp"), translate("Fan turn-on threshold (Celsius). Fan runs at T >= min_temp."))
+min_temp.datatype = "range(1,150)"
+min_temp.default = "45"
 min_temp.rmempty = false
 min_temp.optional = false
 
-min_speed = s:option(Value, "min_speed", translate("min_speed"), translate("Fan speed at minimum fan state (Percents)"))
-min_speed.datatype = "uinteger"
-min_speed.default = "60"
+min_speed = s:option(Value, "min_speed", translate("min_speed"), translate("Fan speed (percent 0-100) at min_temp. Linear curve point."))
+min_speed.datatype = "range(0,100)"
+min_speed.default = "40"
 min_speed.rmempty = false
 min_speed.optional = false
 
-med_temp = s:option(Value, "med_temp", translate("med_temp"), translate("Temperature for medium fan state (Celsius)"))
-med_temp.datatype = "uinteger"
-med_temp.default = "45"
+med_temp = s:option(Value, "med_temp", translate("med_temp"), translate("Middle fan curve point (Celsius)."))
+med_temp.datatype = "range(1,150)"
+med_temp.default = "50"
 med_temp.rmempty = false
 med_temp.optional = false
 
-med_speed = s:option(Value, "med_speed", translate("med_speed"), translate("Fan speed at medium fan state (Percents)"))
-med_speed.datatype = "uinteger"
-med_speed.default = "80"
+med_speed = s:option(Value, "med_speed", translate("med_speed"), translate("Fan speed (percent 0-100) at med_temp. Linear curve point."))
+med_speed.datatype = "range(0,100)"
+med_speed.default = "60"
 med_speed.rmempty = false
 med_speed.optional = false
 
-max_temp = s:option(Value, "max_temp", translate("max_temp"), translate("Temperature for maximum fan state (Celsius)"))
-max_temp.datatype = "uinteger"
-max_temp.default = "50"
+max_temp = s:option(Value, "max_temp", translate("max_temp"), translate("Upper fan curve point (Celsius). Above max_temp, max_speed is used."))
+max_temp.datatype = "range(1,150)"
+max_temp.default = "55"
 max_temp.rmempty = false
 max_temp.optional = false
 
-max_speed = s:option(Value, "max_speed", translate("max_speed"), translate("Fan speed at maximum fan state (default: 100%)"))
-max_speed.datatype = "uinteger"
+max_speed = s:option(Value, "max_speed", translate("max_speed"), translate("Fan speed (percent 0-100) at max_temp and above. 100% maps to full drv_speed_max PWM."))
+max_speed.datatype = "range(0,100)"
 max_speed.default = "100"
 max_speed.rmempty = false
 max_speed.optional = false
 
-interval = s:option(Value, "interval", translate("interval"), translate("Interval for hysteresis adjustment (seconds)"))
-interval.datatype = "uinteger"
+interval = s:option(Value, "interval", translate("interval"), translate("Temperature polling interval in the daemon loop (seconds)."))
+interval.datatype = "range(1,3600)"
 interval.default = "5"
 interval.rmempty = false
 interval.optional = false
 
-temp_hyst = s:option(Value, "temp_hyst", translate("temp_hyst"), translate("Hysteresis value (Celsius)"))
-temp_hyst.datatype = "integer"
-temp_hyst.default = "0"
+temp_hyst = s:option(Value, "temp_hyst", translate("temp_hyst"), translate("Hysteresis (Celsius). Fan off below (min_temp - temp_hyst). Speed increases apply immediately; speed decreases apply only after temperature drops by temp_hyst since the last speed change."))
+temp_hyst.datatype = "range(0,99)"
+temp_hyst.default = "2"
 temp_hyst.rmempty = false
 temp_hyst.optional = false
 
-tmp_sens = s:option(Value, "tmp_sens", translate("tmp_sens"), translate("Temperature sensor name (default: tmp75)"))
+tmp_sens = s:option(Value, "tmp_sens", translate("tmp_sens"), translate("Thermal zone type name (sysfs: thermal_zone*/type)."))
 tmp_sens.datatype = "string"
-tmp_sens.default = "tmp75"
+tmp_sens.default = "cpu0"
 tmp_sens.rmempty = false
 tmp_sens.optional = false
 
-fan_cont = s:option(Value, "fan_cont", translate("fan_cont"), translate("Fan controller name (default: emc230)"))
+fan_cont = s:option(Value, "fan_cont", translate("fan_cont"), translate("Hwmon device name (sysfs: hwmon*/name; pwm1 is used for fan control)."))
 fan_cont.datatype = "string"
 fan_cont.default = "emc230"
 fan_cont.rmempty = false
 fan_cont.optional = false
+
+drv_speed_min = s:option(Value, "drv_speed_min", translate("drv_speed_min"), translate("Minimum PWM value (0-65535, 16-bit). If the calculated speed maps to a PWM below this, the fan is turned off completely."))
+drv_speed_min.datatype = "range(0,65535)"
+drv_speed_min.default = "60"
+drv_speed_min.rmempty = false
+drv_speed_min.optional = false
+
+drv_speed_max = s:option(Value, "drv_speed_max", translate("drv_speed_max"), translate("PWM value for 100% fan speed (16-bit, 1-65535; default 255 for 8-bit EMC230)."))
+drv_speed_max.datatype = "range(1,65535)"
+drv_speed_max.default = "255"
+drv_speed_max.rmempty = false
+drv_speed_max.optional = false
 
 return m
