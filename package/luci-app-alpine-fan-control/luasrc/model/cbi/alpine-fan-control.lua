@@ -102,31 +102,19 @@ min_temp.default = "45"
 min_temp.rmempty = false
 min_temp.optional = false
 
-min_speed = s:option(Value, "min_speed", translate("min_speed"), translate("Fan speed (percent 0-100) at min_temp. Linear curve point."))
+min_speed = s:option(Value, "min_speed", translate("min_speed"), translate("Fan speed (percent 0-100) at min_temp. Lower point of the linear curve."))
 min_speed.datatype = "range(0,100)"
 min_speed.default = "40"
 min_speed.rmempty = false
 min_speed.optional = false
 
-med_temp = s:option(Value, "med_temp", translate("med_temp"), translate("Middle fan curve point (Celsius)."))
-med_temp.datatype = "range(1,150)"
-med_temp.default = "50"
-med_temp.rmempty = false
-med_temp.optional = false
-
-med_speed = s:option(Value, "med_speed", translate("med_speed"), translate("Fan speed (percent 0-100) at med_temp. Linear curve point."))
-med_speed.datatype = "range(0,100)"
-med_speed.default = "60"
-med_speed.rmempty = false
-med_speed.optional = false
-
-max_temp = s:option(Value, "max_temp", translate("max_temp"), translate("Upper fan curve point (Celsius). Above max_temp, max_speed is used."))
+max_temp = s:option(Value, "max_temp", translate("max_temp"), translate("Upper point of the fan curve (Celsius). At and above max_temp, max_speed is used."))
 max_temp.datatype = "range(1,150)"
 max_temp.default = "55"
 max_temp.rmempty = false
 max_temp.optional = false
 
-max_speed = s:option(Value, "max_speed", translate("max_speed"), translate("Fan speed (percent 0-100) at max_temp and above. 100% maps to full drv_speed_max PWM."))
+max_speed = s:option(Value, "max_speed", translate("max_speed"), translate("Fan speed (percent 0-100) at max_temp. Upper point of the linear curve."))
 max_speed.datatype = "range(0,100)"
 max_speed.default = "100"
 max_speed.rmempty = false
@@ -161,6 +149,12 @@ drv_speed_min.datatype = "range(0,65535)"
 drv_speed_min.default = "60"
 drv_speed_min.rmempty = false
 drv_speed_min.optional = false
+
+drv_speed_start = s:option(Value, "drv_speed_start", translate("drv_speed_start"), translate("Kickstart PWM (0-65535) when the fan spins up from stop. Applied for 0.5s before the target PWM."))
+drv_speed_start.datatype = "range(0,65535)"
+drv_speed_start.default = "120"
+drv_speed_start.rmempty = false
+drv_speed_start.optional = false
 
 drv_speed_max = s:option(Value, "drv_speed_max", translate("drv_speed_max"), translate("PWM value for 100% fan speed (16-bit, 1-65535; default 255 for 8-bit EMC230)."))
 drv_speed_max.datatype = "range(1,65535)"
