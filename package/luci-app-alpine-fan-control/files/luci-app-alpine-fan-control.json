@@ -4,7 +4,7 @@
         "read": {
             "file": {
                 "/usr/bin/alpine-fan-controller": [ "exec" ]
-            }, 
+            },
             "uci": [ "alpine-fan-control" ]
         },
         "write": {

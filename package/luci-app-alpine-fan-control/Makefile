@@ -6,7 +6,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=luci-app-alpine-fan-control
 PKG_VERSION:=1.1
-PKG_RELEASE:=20240105
+PKG_RELEASE:=20240603
 PKG_LICENSE:=GPL-3.0
 
 PKG_BUILD_DIR:=$(BUILD_DIR)/$(PKG_NAME)
