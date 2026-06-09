@@ -16,8 +16,8 @@ function get_opt() {
 #
 # min_temp  - fan turn-on threshold; fan runs at T >= min_temp
 # min_speed - fan speed (%) at min_temp
-# max_temp  - upper curve point; at and above max_temp, max_speed is used
-# max_speed - fan speed (%) at max_temp (100% = full drv_speed_max PWM)
+# max_temp  - upper curve point; above max_temp, fan runs at 100%
+# max_speed - fan speed (%) at max_temp (end of linear segment)
 #
 # temp_hyst - hysteresis (Celsius): fan off below (min_temp - temp_hyst);
 #             speed increases apply immediately; speed decreases apply only
@@ -30,28 +30,29 @@ function get_opt() {
 #
 # drv_speed_min - minimum PWM (0-65535); if calculated PWM is below this, fan off
 # drv_speed_max - PWM value for 100% speed (16-bit, 1-65535; default 255 for EMC230)
-# drv_speed_start - kickstart PWM when fan spins up from 0; held 0.5s before target PWM
-# At startup: PWM=drv_speed_min, verify fan RPM, then brief PWM=drv_speed_max
-# If startup test fails: emergency mode - PWM locked to drv_speed_max, no temperature control
+# drv_speed_start - kickstart PWM when fan spins up from 0; also used for startup fan test
+# At startup: PWM=drv_speed_start, verify fan RPM, then temperature control
+# If startup test fails, or PWM>0 with RPM=0 for STARTUP_RPM_ATTEMPTS cycles: emergency mode -
+# PWM set to drv_speed_max and verified; if fan still does not spin, PWM=0
+# STARTUP_RPM_ATTEMPTS - RPM check attempts at startup/emergency test; also stall counter limit
 
-STARTUP_RPM_ATTEMPTS=6
-STARTUP_RPM_WAIT=0.5
-STARTUP_BURST_ATTEMPTS=2
+STARTUP_RPM_ATTEMPTS=5
+STARTUP_RPM_WAIT=1
 
-TEMP_MIN=$(  get_opt min_temp  45 )
-SPEED_MIN=$( get_opt min_speed 40 )
+TEMP_MIN=$(  get_opt min_temp  55 )
+SPEED_MIN=$( get_opt min_speed 20 )
 
-TEMP_MAX=$(  get_opt max_temp  55 )
-SPEED_MAX=$( get_opt max_speed 100 )
+TEMP_MAX=$(  get_opt max_temp  70 )
+SPEED_MAX=$( get_opt max_speed 70 )
 
 TEMP_SENSOR=$( get_opt tmp_sens cpu0  )
 FAN_CONT=$(    get_opt fan_cont emc230 )
 
-HYSTERESIS=$( get_opt temp_hyst 2 )
+HYSTERESIS=$( get_opt temp_hyst 3 )
 SLEEP_INTERVAL=$( get_opt interval 5 )
 DEBUG=$( get_opt debug 0 )
 
-DRV_SPEED_MIN=$( get_opt drv_speed_min 60 )
+DRV_SPEED_MIN=$( get_opt drv_speed_min 50 )
 DRV_SPEED_START=$( get_opt drv_speed_start 120 )
 DRV_SPEED_MAX=$( get_opt drv_speed_max 255 )
 CFG_SPEED_MAX=100
@@ -62,15 +63,58 @@ TEMP_AT_LAST_SPEED_CHANGE=
 LAST_APPLIED_SPEED=
 FAN_ON=
 EMERGENCY_MODE=0
+EMERGENCY_FAN_STOPPED=0
+STALL_COUNT=0
+SENSOR_TEMP=
+SENSOR_PWM=
+SENSOR_RPM=
 
 function log_error {
 	logger "$LOGPREFIX: ERROR: $1"
+}
+
+function log_warning {
+	logger "$LOGPREFIX: WARNING: $1"
 }
 
 function log_debug {
 	if [ "$DEBUG" = "1" ]; then
 		logger "$LOGPREFIX: $1"
 	fi
+}
+
+function read_sensors {
+	SENSOR_TEMP=$( cat $FILE_TEMP 2>/dev/null )
+	SENSOR_TEMP=${SENSOR_TEMP:-0}
+	SENSOR_PWM=$( cat $FILE_SPEED 2>/dev/null )
+	SENSOR_PWM=${SENSOR_PWM:-0}
+	SENSOR_RPM=$( cat $FILE_RPM 2>/dev/null )
+	SENSOR_RPM=${SENSOR_RPM:-0}
+}
+
+function sensor_status {
+	echo "temp=$(( SENSOR_TEMP / 1000 ))°C PWM=$SENSOR_PWM RPM=$SENSOR_RPM"
+}
+
+function log_with_sensors {
+	log_debug "$1 ($(sensor_status))"
+}
+
+function check_fan_stall {
+	if [ "$SENSOR_PWM" -le 0 ] 2>/dev/null || [ "$SENSOR_RPM" -gt 0 ] 2>/dev/null; then
+		STALL_COUNT=0
+		return 0
+	fi
+
+	STALL_COUNT=$(( STALL_COUNT + 1 ))
+	log_debug "fan stall count $STALL_COUNT/$STARTUP_RPM_ATTEMPTS ($(sensor_status))"
+
+	if [ "$STALL_COUNT" -ge "$STARTUP_RPM_ATTEMPTS" ]; then
+		STALL_COUNT=0
+		enter_emergency_mode "fan stall detected: PWM=$SENSOR_PWM but RPM=0 for $STARTUP_RPM_ATTEMPTS cycles ($(sensor_status))"
+		return 1
+	fi
+	return 0
 }
 
 function validate_range {
@@ -123,6 +167,11 @@ if [ "$DRV_SPEED_MIN" -gt "$DRV_SPEED_MAX" ]; then
 	exit 1
 fi
 
+MIN_SPEED_PWM=$(( DRV_SPEED_MAX * SPEED_MIN / CFG_SPEED_MAX ))
+if [ "$SPEED_MIN" -gt 0 ] && [ "$MIN_SPEED_PWM" -gt 0 ] && [ "$MIN_SPEED_PWM" -lt "$DRV_SPEED_MIN" ]; then
+	log_warning "min_speed ${SPEED_MIN}% maps to PWM=$MIN_SPEED_PWM, below drv_speed_min=$DRV_SPEED_MIN - fan off at min_temp until curve PWM reaches minimum"
+fi
+
 # checking for privileges
 if [ $UID -ne 0 ]; then
 	log_error "Writing to sysfs requires privileges, relaunch as root!"
@@ -143,28 +192,18 @@ HYSTERESIS=$(( $HYSTERESIS * 1000 ))
 TEMP_OFF=$(( $TEMP_MIN - $HYSTERESIS ))
 [ $TEMP_OFF -lt 0 ] && TEMP_OFF=0
 
-FILE_SPEED=$( grep -l -F $FAN_CONT /sys/class/hwmon/hwmon*/name 2>/dev/null )
-[ -f "$FILE_SPEED" ] || { log_error "fan controller $FAN_CONT not found" ; exit 1; }
-HWMON_DIR=$( dirname "$FILE_SPEED" 2>/dev/null )
+FILE_HWMON=$( grep -l -F $FAN_CONT /sys/class/hwmon/hwmon*/name 2>/dev/null )
+[ -f "$FILE_HWMON" ] || { log_error "fan controller $FAN_CONT not found" ; exit 1; }
+HWMON_DIR=$( dirname "$FILE_HWMON" )
 FILE_SPEED=$HWMON_DIR/pwm1
-[ -f "$FILE_SPEED" ] || { log_error "Fan controller $FAN_CONT not found" ; exit 1; }
 FILE_RPM=$HWMON_DIR/fan1_input
+[ -f "$FILE_SPEED" ] || { log_error "fan PWM $FILE_SPEED not found" ; exit 1; }
+[ -f "$FILE_RPM" ] || { log_error "fan tachometer $FILE_RPM not found" ; exit 1; }
 
-FILE_TEMP=$( grep -l -F $TEMP_SENSOR /sys/class/thermal/thermal_zone*/type 2>/dev/null )
-[ -f "$FILE_TEMP" ] || { log_error "thermal sensor $TEMP_SENSOR not found" ; exit 1; }
-FILE_TEMP=$( dirname "$FILE_TEMP" 2>/dev/null )
-FILE_TEMP=$FILE_TEMP/temp
-[ -f "$FILE_TEMP" ] || { log_error "Thermal sensor $TEMP_SENSOR not found" ; exit 1; }
-
-function get_speed {
-	local speed=$(cat $FILE_SPEED)
-	speed=$(( $CFG_SPEED_MAX * $speed / $DRV_SPEED_MAX ))
-	echo $speed
-}
-
-function get_pwm {
-	cat $FILE_SPEED 2>/dev/null || echo 0
-}
+FILE_THERMAL=$( grep -l -F $TEMP_SENSOR /sys/class/thermal/thermal_zone*/type 2>/dev/null )
+[ -f "$FILE_THERMAL" ] || { log_error "thermal sensor $TEMP_SENSOR not found" ; exit 1; }
+FILE_TEMP=$( dirname "$FILE_THERMAL" )/temp
+[ -f "$FILE_TEMP" ] || { log_error "thermal sensor temp $FILE_TEMP not found" ; exit 1; }
 
 function pwm_to_speed {
 	local pwm=$1
@@ -196,40 +235,34 @@ function applied_speed {
 
 function internal_set_pwm {
 	local value=$1
-	local cur_pwm
 
 	[ $value -lt 0 ] && value=0
 	[ $value -gt $DRV_SPEED_MAX ] && value=$DRV_SPEED_MAX
 	[ $value -gt $PWM_MAX ] && value=$PWM_MAX
 
 	if [ $value -gt 0 ]; then
-		cur_pwm=$( cat $FILE_SPEED 2>/dev/null )
-		cur_pwm=${cur_pwm:-0}
-		if [ "$cur_pwm" -le 0 ] 2>/dev/null; then
+		if [ "$SENSOR_PWM" -le 0 ] 2>/dev/null && [ "$value" -ne "$DRV_SPEED_START" ]; then
 			log_debug "fan kickstart from stop: $( pwm_to_speed $DRV_SPEED_START )% (PWM=$DRV_SPEED_START) for ${STARTUP_RPM_WAIT}s"
 			echo $DRV_SPEED_START > $FILE_SPEED
+			SENSOR_PWM=$DRV_SPEED_START
 			sleep $STARTUP_RPM_WAIT
 		fi
 	fi
 
 	echo $value > $FILE_SPEED
-}
-
-function get_fan_rpm {
-	[ -f "$FILE_RPM" ] || { echo 0; return; }
-	cat $FILE_RPM 2>/dev/null || echo 0
+	SENSOR_PWM=$value
 }
 
 function wait_for_fan_rpm {
+	local context=$1
 	local attempt=1
-	local rpm
 
 	while [ $attempt -le $STARTUP_RPM_ATTEMPTS ]; do
 		sleep $STARTUP_RPM_WAIT
-		rpm=$( get_fan_rpm )
-		log_debug "startup fan test: attempt $attempt/$STARTUP_RPM_ATTEMPTS RPM=$rpm"
-		if [ "$rpm" -gt 0 ] 2>/dev/null; then
-			echo $rpm
+		read_sensors
+		log_debug "$context: attempt $attempt/$STARTUP_RPM_ATTEMPTS RPM=$SENSOR_RPM"
+		if [ "$SENSOR_RPM" -gt 0 ] 2>/dev/null; then
+			echo $SENSOR_RPM
 			return 0
 		fi
 		attempt=$(( attempt + 1 ))
@@ -238,49 +271,51 @@ function wait_for_fan_rpm {
 	return 1
 }
 
-function startup_burst_wait {
-	local attempt=1
+function startup_fan_test {
+	local rpm
 
-	while [ $attempt -le $STARTUP_BURST_ATTEMPTS ]; do
-		sleep $STARTUP_RPM_WAIT
-		attempt=$(( attempt + 1 ))
-	done
+	logger "$LOGPREFIX: startup fan test: $( pwm_to_speed $DRV_SPEED_START )% (PWM=$DRV_SPEED_START), up to $STARTUP_RPM_ATTEMPTS attempts, ${STARTUP_RPM_WAIT}s each"
+	internal_set_pwm $DRV_SPEED_START
+
+	rpm=$( wait_for_fan_rpm "startup fan test" )
+	if [ "$rpm" -le 0 ] 2>/dev/null; then
+		enter_emergency_mode "startup fan test failed: no rotation at PWM=$DRV_SPEED_START after $STARTUP_RPM_ATTEMPTS attempts"
+		return 1
+	fi
+
+	logger "$LOGPREFIX: startup fan test passed at RPM=$rpm"
+	return 0
 }
 
 function enter_emergency_mode {
 	local reason=$1
+	local rpm
 
 	EMERGENCY_MODE=1
+	EMERGENCY_FAN_STOPPED=0
 	log_error "$reason"
-	logger "$LOGPREFIX: ERROR: Entering fan emergency mode - PWM locked to $DRV_SPEED_MAX, temperature control disabled"
+	logger "$LOGPREFIX: ERROR: Entering fan emergency mode - PWM=$DRV_SPEED_MAX, temperature control disabled"
 	internal_set_pwm $DRV_SPEED_MAX
+
+	logger "$LOGPREFIX: emergency fan test: PWM=$DRV_SPEED_MAX, up to $STARTUP_RPM_ATTEMPTS attempts, ${STARTUP_RPM_WAIT}s each"
+	rpm=$( wait_for_fan_rpm "emergency fan test" )
+	if [ "$rpm" -le 0 ] 2>/dev/null; then
+		EMERGENCY_FAN_STOPPED=1
+		log_error "emergency fan test failed: no rotation at PWM=$DRV_SPEED_MAX after $STARTUP_RPM_ATTEMPTS attempts"
+		logger "$LOGPREFIX: ERROR: Emergency fan test failed - stopping fan (PWM=0)"
+		internal_set_pwm 0
+		return
+	fi
+
+	logger "$LOGPREFIX: emergency fan test passed at RPM=$rpm"
 }
 
 function log_emergency_warning {
-	logger "$LOGPREFIX: WARNING: Fan emergency mode active - PWM locked at $DRV_SPEED_MAX, temperature control disabled"
-}
-
-function startup_fan_test {
-	local rpm
-
-	if [ ! -f "$FILE_RPM" ]; then
-		log_error "fan tachometer $FILE_RPM not found, skipping startup fan test"
-		return 1
+	if [ "$EMERGENCY_FAN_STOPPED" = "1" ]; then
+		logger "$LOGPREFIX: WARNING: Fan emergency mode - fan stopped (PWM=0), temperature control disabled"
+	else
+		logger "$LOGPREFIX: WARNING: Fan emergency mode active - PWM locked at $DRV_SPEED_MAX, temperature control disabled"
 	fi
-
-	logger "$LOGPREFIX: startup fan test: $( pwm_to_speed $DRV_SPEED_MIN )% (PWM=$DRV_SPEED_MIN), up to $STARTUP_RPM_ATTEMPTS attempts, ${STARTUP_RPM_WAIT}s each"
-	internal_set_pwm $DRV_SPEED_MIN
-
-	rpm=$( wait_for_fan_rpm )
-	if [ "$rpm" -le 0 ] 2>/dev/null; then
-		enter_emergency_mode "startup fan test failed: no rotation at PWM=$DRV_SPEED_MIN after $STARTUP_RPM_ATTEMPTS attempts"
-		return 1
-	fi
-
-	logger "$LOGPREFIX: startup fan test passed at RPM=$rpm, burst to $( pwm_to_speed $DRV_SPEED_MAX )% (PWM=$DRV_SPEED_MAX)"
-	internal_set_pwm $DRV_SPEED_MAX
-	startup_burst_wait
-	return 0
 }
 
 function internal_set_speed {
@@ -292,15 +327,16 @@ function set_speed {
 	local interpolated=$2
 	local force=$3
 	local TEMP=$4
-	local tmp cur_speed cur_pwm EFFECTIVE new_pwm applied_pwm
+	local tmp cur_speed EFFECTIVE new_pwm applied_pwm
 
 	EFFECTIVE=$( applied_speed $NEW_SPEED )
 	new_pwm=$( speed_to_pwm $NEW_SPEED )
 	applied_pwm=$( speed_to_pwm $EFFECTIVE )
+	cur_speed=$( pwm_to_speed $SENSOR_PWM )
 
 	if [ "$force" = "1" ]; then
 		[ "$EFFECTIVE" = "$LAST_APPLIED_SPEED" ] && return
-		log_debug "forced speed change to ${NEW_SPEED}% (PWM=$new_pwm) at temp $TEMP"
+		log_with_sensors "forced speed change to ${NEW_SPEED}% (PWM=$new_pwm), current ${cur_speed}%"
 		internal_set_speed $NEW_SPEED
 		LAST_APPLIED_SPEED=$EFFECTIVE
 		TEMP_AT_LAST_SPEED_CHANGE=$TEMP
@@ -310,18 +346,16 @@ function set_speed {
 	[ "$EFFECTIVE" = "$LAST_APPLIED_SPEED" ] && return
 
 	if [ "$DEBUG" = "1" ]; then
-		cur_speed=$( get_speed )
-		cur_pwm=$( get_pwm )
-		log_debug "current speed: ${cur_speed}% (PWM=$cur_pwm), requested ${NEW_SPEED}% (PWM=$new_pwm)"
-		[ "$interpolated" = "1" ] && log_debug "interpolated speed for temp $TEMP: ${NEW_SPEED}% (PWM=$new_pwm)"
+		log_with_sensors "current ${cur_speed}%, requested ${NEW_SPEED}% (PWM=$new_pwm)"
+		[ "$interpolated" = "1" ] && log_with_sensors "interpolated speed ${NEW_SPEED}% (PWM=$new_pwm)"
 	fi
 
 	# speed increase: apply immediately (no hysteresis)
 	if [ -z "$LAST_APPLIED_SPEED" ] || [ "$NEW_SPEED" -gt "$LAST_APPLIED_SPEED" ]; then
-		log_debug "speed increase ${LAST_APPLIED_SPEED}% -> ${NEW_SPEED}% (PWM=$applied_pwm) at temp $TEMP"
+		log_with_sensors "speed increase ${LAST_APPLIED_SPEED}% -> ${NEW_SPEED}% (PWM=$applied_pwm)"
 		internal_set_speed $NEW_SPEED
 		LAST_APPLIED_SPEED=$EFFECTIVE
-		[ "$EFFECTIVE" != "$NEW_SPEED" ] && log_debug "PWM below minimum, fan off instead of ${NEW_SPEED}% (PWM=$new_pwm)"
+		[ "$EFFECTIVE" != "$NEW_SPEED" ] && log_with_sensors "PWM below minimum, fan off instead of ${NEW_SPEED}% (PWM=$new_pwm)"
 		TEMP_AT_LAST_SPEED_CHANGE=$TEMP
 		return
 	fi
@@ -329,16 +363,13 @@ function set_speed {
 	# speed decrease: apply only after temperature drops by hysteresis
 	tmp=$TEMP_AT_LAST_SPEED_CHANGE
 	if [ -z "$tmp" ] || [ $(( TEMP + HYSTERESIS )) -le "$tmp" ]; then
-		log_debug "speed decrease ${LAST_APPLIED_SPEED}% -> ${NEW_SPEED}% (PWM=$applied_pwm) at temp $TEMP (last change at $tmp)"
+		log_with_sensors "speed decrease ${LAST_APPLIED_SPEED}% -> ${NEW_SPEED}% (PWM=$applied_pwm), last change at temp $tmp"
 		internal_set_speed $NEW_SPEED
 		LAST_APPLIED_SPEED=$EFFECTIVE
-		[ "$EFFECTIVE" != "$NEW_SPEED" ] && log_debug "PWM below minimum, fan off instead of ${NEW_SPEED}% (PWM=$new_pwm)"
+		[ "$EFFECTIVE" != "$NEW_SPEED" ] && log_with_sensors "PWM below minimum, fan off instead of ${NEW_SPEED}% (PWM=$new_pwm)"
 		TEMP_AT_LAST_SPEED_CHANGE=$TEMP
 	else
-		if [ "$DEBUG" = "1" ]; then
-			cur_pwm=$( get_pwm )
-			log_debug "speed decrease held by hysteresis, temp $TEMP, current ${LAST_APPLIED_SPEED}% (PWM=$cur_pwm), need temp <= $(( tmp - HYSTERESIS ))"
-		fi
+		log_with_sensors "speed decrease held by hysteresis, current ${LAST_APPLIED_SPEED}%, need temp <= $(( tmp - HYSTERESIS ))"
 	fi
 }
 
@@ -357,15 +388,13 @@ function set_speed_adv {
 	set_speed "$SPEED" 1 "" "$TEMP"
 }
 
-TEMP_PREV=
-
 function interpolate_speed {
-	local TEMP=$(cat $FILE_TEMP)
+	read_sensors
+	local TEMP=$SENSOR_TEMP
 
-	if [ "$TEMP" != "$TEMP_PREV" ]; then
-		log_debug "current temp: $TEMP"
-		TEMP_PREV=$TEMP
-	fi
+	log_with_sensors "sensors"
+
+	check_fan_stall || return
 
 	if [ $TEMP -lt $TEMP_OFF ]; then
 		# fan off below (min_temp - temp_hyst)
@@ -388,7 +417,8 @@ function interpolate_speed {
 	fi
 
 	if [ $TEMP -gt $TEMP_MAX ]; then
-		set_speed $SPEED_MAX "" "" "$TEMP"
+		# above max_temp: full fan speed (100%)
+		set_speed $CFG_SPEED_MAX "" "" "$TEMP"
 		return
 	fi
 	if [ $TEMP -ge $TEMP_MIN ]; then
@@ -410,16 +440,19 @@ trap "reset_on_exit" SIGINT SIGTERM
 
 function run_daemon {
 	while true; do
+		sleep $SLEEP_INTERVAL
 		if [ "$EMERGENCY_MODE" = "1" ]; then
 			log_emergency_warning
 		else
 			interpolate_speed
 		fi
-		sleep $SLEEP_INTERVAL
 	done
 }
 
 logger "$LOGPREFIX: run daemon:" $OPTLIST
+read_sensors
 startup_fan_test
-# finally start the loop
+if [ "$EMERGENCY_MODE" != "1" ]; then
+	interpolate_speed
+fi
 run_daemon
