@@ -2,8 +2,6 @@
 -- Copyright 2008 Jo-Philipp Wich <jow@openwrt.org>
 -- Licensed to the public under the Apache License 2.0.
 
-local json = require "luci.jsonc"
-
 local m, s, p, ok
 local cur_temp, cur_pwm, rpm
 
@@ -22,6 +20,14 @@ local defaults = {
 	drv_speed_start = "120",
 	drv_speed_max = "255",
 }
+
+local function defaults_to_js(d)
+	local t = {}
+	for k, v in pairs(d) do
+		t[#t + 1] = string.format("%q:%q", k, v)
+	end
+	return "{" .. table.concat(t, ",") .. "}"
+end
 
 local uci = (require "luci.model.uci").cursor()
 local cfg = "@alpine-fan-control[0]"
@@ -205,24 +211,42 @@ reset_link = s:option(DummyValue, "_reset", translate("Reset to defaults"),
 reset_link.rawhtml = true
 
 function reset_link.cfgvalue()
-	local defs = json.stringify(defaults)
-	local confirm = json.stringify(translate("Restore factory defaults?"))
 	return string.format(
-		'<button type="button" class="btn cbi-button cbi-button-reset" id="alpine-fan-reset-btn">%s</button>' ..
-		'<script type="text/javascript">//<![CDATA[' ..
-		'(function(){' ..
-		'var defs=%s,msg=%s,btn=document.getElementById("alpine-fan-reset-btn");' ..
-		'if(!btn||btn._bound)return;btn._bound=1;' ..
-		'btn.onclick=function(){' ..
-		'if(!confirm(msg))return;' ..
-		'for(var k in defs){if(!Object.prototype.hasOwnProperty.call(defs,k))continue;' ..
-		'var nodes=document.querySelectorAll(\'[name$=".\'+k+\'"]\');' ..
-		'for(var i=0;i<nodes.length;i++){var el=nodes[i];' ..
-		'if(el.type==="checkbox")el.checked=(defs[k]==="1");else el.value=defs[k];}}' ..
-		'};' ..
-		'})();' ..
-		'//]]></script>',
-		translate("Reset to defaults"), defs, confirm)
+		'<input type="button" class="btn cbi-button-action important" id="alpine-fan-reset-btn" ' ..
+		'style="cursor:pointer" value="%s" />',
+		translate("Reset to defaults"))
+end
+
+function m.render(self, ...)
+	Map.render(self, ...)
+	luci.http.write(string.format([[
+<script type="text/javascript">
+function alpineFanControlApplyDefaults() {
+	var d = %s;
+	if (!confirm(%s)) return;
+	for (var k in d) {
+		if (!Object.prototype.hasOwnProperty.call(d, k)) continue;
+		var nodes = document.querySelectorAll("[name$='." + k + "']");
+		for (var i = 0; i < nodes.length; i++) {
+			var el = nodes[i];
+			if (el.type === "checkbox") el.checked = (d[k] === "1");
+			else el.value = d[k];
+		}
+	}
+}
+(function() {
+	function bind() {
+		var btn = document.getElementById("alpine-fan-reset-btn");
+		if (!btn || btn._alpineBound) return;
+		btn._alpineBound = true;
+		btn.addEventListener("click", alpineFanControlApplyDefaults);
+	}
+	if (document.readyState === "loading")
+		document.addEventListener("DOMContentLoaded", bind);
+	else
+		bind();
+})();
+</script>]], defaults_to_js(defaults), string.format("%q", translate("Restore factory defaults?"))))
 end
 
 return m
