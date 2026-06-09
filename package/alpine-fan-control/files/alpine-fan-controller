@@ -31,7 +31,7 @@ function get_opt() {
 # drv_speed_min - minimum PWM (0-65535); if calculated PWM is below this, fan off
 # drv_speed_max - PWM value for 100% speed (16-bit, 1-65535; default 255 for EMC230)
 # drv_speed_start - kickstart PWM when fan spins up from 0; also used for startup fan test
-# At startup: PWM=drv_speed_start, verify fan RPM, then temperature control
+# At startup: PWM=drv_speed_start, verify fan RPM, then enter main loop (first interpolate after interval)
 # If startup test fails, or PWM>0 with RPM=0 for STARTUP_RPM_ATTEMPTS cycles: emergency mode -
 # PWM set to drv_speed_max and verified; if fan still does not spin, PWM=0
 # STARTUP_RPM_ATTEMPTS - RPM check attempts at startup/emergency test; also stall counter limit
@@ -452,7 +452,4 @@ function run_daemon {
 logger "$LOGPREFIX: run daemon:" $OPTLIST
 read_sensors
 startup_fan_test
-if [ "$EMERGENCY_MODE" != "1" ]; then
-	interpolate_speed
-fi
 run_daemon
