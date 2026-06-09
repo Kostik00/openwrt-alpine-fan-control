@@ -179,46 +179,15 @@ drv_speed_max.default = "255"
 drv_speed_max.rmempty = false
 drv_speed_max.optional = false
 
-local defaults = {
-	enable = "1",
-	debug = "0",
-	min_temp = "55",
-	min_speed = "20",
-	max_temp = "70",
-	max_speed = "70",
-	interval = "5",
-	temp_hyst = "3",
-	tmp_sens = "cpu0",
-	fan_cont = "emc230",
-	drv_speed_min = "50",
-	drv_speed_start = "120",
-	drv_speed_max = "255",
-}
-
-local obsolete_opts = { "med_temp", "med_speed", "stall_attempts" }
-
-reset = s:option(Button, "_reset", translate("Reset to defaults"),
+reset_link = s:option(DummyValue, "_reset", translate("Reset to defaults"),
 	translate("Restore all settings to factory defaults and restart the fan control service."))
-reset.inputtitle = translate("Reset to defaults")
-reset.inputstyle = "reset"
-reset.rmempty = true
+reset_link.rawhtml = true
 
-function reset.cfgvalue()
-	return ""
-end
-
-function reset.write(self, section)
-	local uci = luci.model.uci.cursor()
-
-	for opt, val in pairs(defaults) do
-		uci:set("alpine-fan-control", section, opt, val)
-	end
-	for _, opt in ipairs(obsolete_opts) do
-		uci:delete("alpine-fan-control", section, opt)
-	end
-	uci:commit("alpine-fan-control")
-	luci.sys.call("/etc/init.d/alpine-fan-control reload >/dev/null 2>&1")
-	luci.http.redirect(luci.dispatcher.build_url("admin", "system", "alpine-fan-control"))
+function reset_link.cfgvalue()
+	local url = luci.dispatcher.build_url("admin", "system", "alpine-fan-control", "reset")
+	return string.format(
+		'<a class="btn cbi-button cbi-button-reset" href="%s">%s</a>',
+		url, translate("Reset to defaults"))
 end
 
 return m
