@@ -3,7 +3,7 @@
 START=99
 SERVICE=alpine-fan-control
 
-PROG="alpine-fan-controller"
+PROG="/usr/bin/alpine-fan-controller"
 USE_PROCD=1
 ENABLED=0
 

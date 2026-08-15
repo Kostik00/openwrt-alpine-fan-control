@@ -31,6 +31,11 @@ function get_opt() {
 # drv_speed_min - minimum PWM (0-65535); if calculated PWM is below this, fan off
 # drv_speed_max - PWM value for 100% speed (16-bit, 1-65535; default 255 for EMC230)
 # drv_speed_start - kickstart PWM when fan spins up from 0; also used for startup fan test
+#
+# pwm_method - PWM output method: 'sysfs' (kernel hwmon) or 'i2c' (direct I2C via i2cset).
+#              i2c bypasses kernel thermal PWM quantization on EMC230 when max_state=10. Requires i2c-tools.
+# i2c_bus, i2c_addr, i2c_reg - I2C path to Fan Drive Setting (AX9000: bus 0, 0x2f, 0x30)
+# disable_thermal - disable EMC2305 kernel thermal zones to prevent kernel from overwriting I2C PWM
 # At startup: PWM=drv_speed_start, verify fan RPM, then enter main loop (first interpolate after interval)
 # If startup test fails, or PWM>0 with RPM=0 for STARTUP_RPM_ATTEMPTS cycles: emergency mode -
 # PWM set to drv_speed_max and verified; if fan still does not spin, PWM=0
@@ -55,6 +60,11 @@ DEBUG=$( get_opt debug 0 )
 DRV_SPEED_MIN=$( get_opt drv_speed_min 50 )
 DRV_SPEED_START=$( get_opt drv_speed_start 120 )
 DRV_SPEED_MAX=$( get_opt drv_speed_max 255 )
+PWM_METHOD=$( get_opt pwm_method sysfs )
+I2C_BUS=$( get_opt i2c_bus 0 )
+I2C_ADDR=$( get_opt i2c_addr 0x2f )
+I2C_REG=$( get_opt i2c_reg 0x30 )
+DISABLE_THERMAL=$( get_opt disable_thermal 0 )
 CFG_SPEED_MAX=100
 PWM_MAX=65535
 
@@ -83,10 +93,50 @@ function log_debug {
 	fi
 }
 
+function read_pwm_hw {
+	local raw
+
+	if [ "$PWM_METHOD" = "i2c" ]; then
+		raw=$( i2cget -f -y "$I2C_BUS" "$I2C_ADDR" "$I2C_REG" 2>/dev/null ) || return 1
+		echo $(( raw ))
+		return 0
+	fi
+
+	cat $FILE_SPEED 2>/dev/null
+}
+
+function write_pwm_hw {
+	local value=$1
+
+	if [ "$PWM_METHOD" = "i2c" ]; then
+		i2cset -f -y "$I2C_BUS" "$I2C_ADDR" "$I2C_REG" "$value" 2>/dev/null
+		return $?
+	fi
+
+	echo $value > $FILE_SPEED
+}
+
+function disable_kernel_fan_thermal {
+	local tz c target type cdev_dir
+
+	for tz in /sys/class/thermal/thermal_zone*; do
+		for c in "$tz"/cdev*; do
+			[ -e "$c" ] || continue
+			target=$( readlink -f "$c" 2>/dev/null ) || continue
+			cdev_dir=$( dirname "$target" )
+			[ -f "$cdev_dir/type" ] || continue
+			type=$( cat "$cdev_dir/type" 2>/dev/null )
+			echo "$type" | grep -q emc2305 || continue
+			echo disabled > "$tz/mode" 2>/dev/null && \
+				log_debug "disabled $(basename "$tz") ($type)"
+		done
+	done
+}
+
 function read_sensors {
 	SENSOR_TEMP=$( cat $FILE_TEMP 2>/dev/null )
 	SENSOR_TEMP=${SENSOR_TEMP:-0}
-	SENSOR_PWM=$( cat $FILE_SPEED 2>/dev/null )
+	SENSOR_PWM=$( read_pwm_hw 2>/dev/null )
 	SENSOR_PWM=${SENSOR_PWM:-0}
 	SENSOR_RPM=$( cat $FILE_RPM 2>/dev/null )
 	SENSOR_RPM=${SENSOR_RPM:-0}
@@ -147,6 +197,15 @@ validate_range "drv_speed_min" "$DRV_SPEED_MIN" 0 $PWM_MAX
 validate_range "drv_speed_start" "$DRV_SPEED_START" 0 $PWM_MAX
 validate_range "debug" "$DEBUG" 0 1
 
+if [ "$PWM_METHOD" != "sysfs" ] && [ "$PWM_METHOD" != "i2c" ]; then
+	log_error "pwm_method must be 'sysfs' or 'i2c'"
+	exit 1
+fi
+
+if [ "$PWM_METHOD" = "i2c" ]; then
+	validate_range "i2c_bus" "$I2C_BUS" 0 99
+fi
+
 if [ "$TEMP_MIN" -ge "$TEMP_MAX" ]; then
 	log_error "Temperature thresholds must satisfy min_temp < max_temp"
 	exit 1
@@ -184,6 +243,7 @@ OPTLIST="$OPTLIST [$TEMP_MIN $SPEED_MIN]"
 OPTLIST="$OPTLIST [$TEMP_MAX $SPEED_MAX]"
 OPTLIST="$OPTLIST $HYSTERESIS $SLEEP_INTERVAL $DEBUG"
 OPTLIST="$OPTLIST $TEMP_SENSOR $FAN_CONT"
+[ "$PWM_METHOD" = "i2c" ] && OPTLIST="$OPTLIST i2c($I2C_BUS $I2C_ADDR $I2C_REG)"
 
 # Perform conversion to millidegrees Celsius
 TEMP_MIN=$(( $TEMP_MIN * 1000 ))
@@ -235,22 +295,31 @@ function applied_speed {
 
 function internal_set_pwm {
 	local value=$1
+	local requested=$value
+	local actual
 
 	[ $value -lt 0 ] && value=0
 	[ $value -gt $DRV_SPEED_MAX ] && value=$DRV_SPEED_MAX
 	[ $value -gt $PWM_MAX ] && value=$PWM_MAX
+	requested=$value
 
 	if [ $value -gt 0 ]; then
 		if [ "$SENSOR_PWM" -le 0 ] 2>/dev/null && [ "$value" -ne "$DRV_SPEED_START" ]; then
 			log_debug "fan kickstart from stop: $( pwm_to_speed $DRV_SPEED_START )% (PWM=$DRV_SPEED_START) for ${STARTUP_RPM_WAIT}s"
-			echo $DRV_SPEED_START > $FILE_SPEED
+			write_pwm_hw $DRV_SPEED_START
 			SENSOR_PWM=$DRV_SPEED_START
 			sleep $STARTUP_RPM_WAIT
 		fi
 	fi
 
-	echo $value > $FILE_SPEED
-	SENSOR_PWM=$value
+	write_pwm_hw $value || log_error "failed to set PWM=$value"
+	actual=$( read_pwm_hw 2>/dev/null )
+	actual=${actual:-$value}
+	SENSOR_PWM=$actual
+
+	if [ "$actual" != "$requested" ]; then
+		log_debug "PWM read-back: requested $requested, applied $actual ($( pwm_to_speed $actual )%)"
+	fi
 }
 
 function wait_for_fan_rpm {
@@ -335,7 +404,7 @@ function set_speed {
 	cur_speed=$( pwm_to_speed $SENSOR_PWM )
 
 	if [ "$force" = "1" ]; then
-		[ "$EFFECTIVE" = "$LAST_APPLIED_SPEED" ] && return
+		[ "$EFFECTIVE" = "$LAST_APPLIED_SPEED" ] && [ "$SENSOR_PWM" = "$new_pwm" ] && return
 		log_with_sensors "forced speed change to ${NEW_SPEED}% (PWM=$new_pwm), current ${cur_speed}%"
 		internal_set_speed $NEW_SPEED
 		LAST_APPLIED_SPEED=$EFFECTIVE
@@ -343,7 +412,7 @@ function set_speed {
 		return
 	fi
 
-	[ "$EFFECTIVE" = "$LAST_APPLIED_SPEED" ] && return
+	[ "$EFFECTIVE" = "$LAST_APPLIED_SPEED" ] && [ "$SENSOR_PWM" = "$new_pwm" ] && return
 
 	if [ "$DEBUG" = "1" ]; then
 		log_with_sensors "current ${cur_speed}%, requested ${NEW_SPEED}% (PWM=$new_pwm)"
@@ -450,6 +519,17 @@ function run_daemon {
 }
 
 logger "$LOGPREFIX: run daemon:" $OPTLIST
+
+if [ "$PWM_METHOD" = "i2c" ]; then
+	command -v i2cset >/dev/null 2>&1 || { log_error "pwm_method=i2c requires i2cset (package i2c-tools)"; exit 1; }
+	command -v i2cget >/dev/null 2>&1 || { log_error "pwm_method=i2c requires i2cget (package i2c-tools)"; exit 1; }
+	logger "$LOGPREFIX: pwm_method=i2c: bus=$I2C_BUS addr=$I2C_ADDR reg=$I2C_REG"
+	if [ "$DISABLE_THERMAL" = "1" ]; then
+		disable_kernel_fan_thermal
+		logger "$LOGPREFIX: EMC2305 kernel thermal zones disabled"
+	fi
+fi
+
 read_sensors
 startup_fan_test
 run_daemon

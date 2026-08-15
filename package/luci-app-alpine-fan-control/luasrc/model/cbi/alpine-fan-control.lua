@@ -19,6 +19,11 @@ local defaults = {
 	drv_speed_min = "50",
 	drv_speed_start = "120",
 	drv_speed_max = "255",
+	pwm_method = "i2c",
+	disable_thermal = "0",
+	i2c_bus = "0",
+	i2c_addr = "0x2f",
+	i2c_reg = "0x30",
 }
 
 local function defaults_to_js(d)
@@ -206,6 +211,34 @@ drv_speed_max.default = defaults.drv_speed_max
 drv_speed_max.rmempty = false
 drv_speed_max.optional = false
 
+pwm_method = s:option(ListValue, "pwm_method", translate("PWM output method"),
+	translate("'sysfs' uses kernel hwmon driver. 'i2c' writes EMC230 Fan Drive register directly via i2cset (full 8-bit PWM, bypasses kernel quantization on AX9000)."))
+pwm_method:value("sysfs", translate("sysfs (kernel hwmon)"))
+pwm_method:value("i2c", translate("I2C (direct i2cset)"))
+pwm_method.default = defaults.pwm_method
+pwm_method.rmempty = false
+
+disable_thermal = s:option(Flag, "disable_thermal", translate("Disable kernel thermal"),
+	translate("Disable EMC2305 kernel thermal zones on start. Prevents the kernel from overwriting PWM set via I2C. Enable if the kernel thermal driver interferes with direct I2C control."))
+disable_thermal.default = defaults.disable_thermal
+disable_thermal.rmempty = false
+disable_thermal:depends("pwm_method", "i2c")
+
+i2c_bus = s:option(Value, "i2c_bus", translate("i2c_bus"), translate("I2C bus number (AX9000: 0)."))
+i2c_bus.datatype = "range(0,99)"
+i2c_bus.default = defaults.i2c_bus
+i2c_bus:depends("pwm_method", "i2c")
+
+i2c_addr = s:option(Value, "i2c_addr", translate("i2c_addr"), translate("EMC230 I2C address (AX9000: 0x2f)."))
+i2c_addr.datatype = "string"
+i2c_addr.default = defaults.i2c_addr
+i2c_addr:depends("pwm_method", "i2c")
+
+i2c_reg = s:option(Value, "i2c_reg", translate("i2c_reg"), translate("Fan Drive Setting register (PWM1: 0x30)."))
+i2c_reg.datatype = "string"
+i2c_reg.default = defaults.i2c_reg
+i2c_reg:depends("pwm_method", "i2c")
+
 reset_link = s:option(DummyValue, "_reset", translate("Reset to defaults"),
 	translate("Fill the form with factory defaults. Press Save to apply changes."))
 reset_link.rawhtml = true
@@ -230,6 +263,7 @@ function alpineFanControlApplyDefaults() {
 		for (var i = 0; i < nodes.length; i++) {
 			var el = nodes[i];
 			if (el.type === "checkbox") el.checked = (d[k] === "1");
+			else if (el.tagName === "SELECT") { el.value = d[k]; el.dispatchEvent(new Event("change", {bubbles:true})); }
 			else el.value = d[k];
 		}
 	}
