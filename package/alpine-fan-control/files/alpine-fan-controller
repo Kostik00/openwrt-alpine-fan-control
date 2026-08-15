@@ -402,16 +402,14 @@ function set_speed {
 	local interpolated=$2
 	local force=$3
 	local TEMP=$4
-	local tmp cur_speed EFFECTIVE new_pwm applied_pwm
+	local EFFECTIVE new_pwm
 
 	EFFECTIVE=$( applied_speed $NEW_SPEED )
 	new_pwm=$( speed_to_pwm $NEW_SPEED )
-	applied_pwm=$( speed_to_pwm $EFFECTIVE )
-	cur_speed=$( pwm_to_speed $SENSOR_PWM )
 
 	if [ "$force" = "1" ]; then
 		[ "$EFFECTIVE" = "$LAST_APPLIED_SPEED" ] && [ "$SENSOR_PWM" = "$new_pwm" ] && return
-		log_with_sensors "forced speed change to ${NEW_SPEED}% (PWM=$new_pwm), current ${cur_speed}%"
+		log_with_sensors "speed forced: cur=$(pwm_to_speed $SENSOR_PWM)%($SENSOR_PWM) target=${NEW_SPEED}%($new_pwm) new=${NEW_SPEED}%($new_pwm)"
 		internal_set_speed $NEW_SPEED
 		LAST_APPLIED_SPEED=$EFFECTIVE
 		TEMP_AT_LAST_SPEED_CHANGE=$TEMP
@@ -421,16 +419,15 @@ function set_speed {
 	[ "$EFFECTIVE" = "$LAST_APPLIED_SPEED" ] && [ "$SENSOR_PWM" = "$new_pwm" ] && return
 
 	if [ "$DEBUG" = "1" ]; then
-		log_with_sensors "current ${cur_speed}%, requested ${NEW_SPEED}% (PWM=$new_pwm)"
-		[ "$interpolated" = "1" ] && log_with_sensors "interpolated speed ${NEW_SPEED}% (PWM=$new_pwm)"
+		log_with_sensors "speed request: cur=$(pwm_to_speed $SENSOR_PWM)%($SENSOR_PWM) target=${NEW_SPEED}%($new_pwm)"
 	fi
 
 	# speed increase: apply immediately (no hysteresis)
 	if [ -z "$LAST_APPLIED_SPEED" ] || [ "$NEW_SPEED" -gt "$LAST_APPLIED_SPEED" ]; then
-		log_with_sensors "speed increase ${LAST_APPLIED_SPEED}% -> ${NEW_SPEED}% (PWM=$applied_pwm)"
+		log_with_sensors "speed increase: cur=$(pwm_to_speed $SENSOR_PWM)%($SENSOR_PWM) target=${NEW_SPEED}%($new_pwm) new=${NEW_SPEED}%($new_pwm)"
 		internal_set_speed $NEW_SPEED
 		LAST_APPLIED_SPEED=$EFFECTIVE
-		[ "$EFFECTIVE" != "$NEW_SPEED" ] && log_with_sensors "PWM below minimum, fan off instead of ${NEW_SPEED}% (PWM=$new_pwm)"
+		[ "$EFFECTIVE" != "$NEW_SPEED" ] && log_with_sensors "speed increase: PWM below minimum, fan off"
 		TEMP_AT_LAST_SPEED_CHANGE=$TEMP
 		return
 	fi
@@ -452,7 +449,7 @@ function set_speed {
 
 	# apply PWM, convert back to % only for LAST_APPLIED_SPEED
 	local gradual_speed=$( pwm_to_speed $gradual_pwm )
-		log_with_sensors "speed decrease: cur=$(pwm_to_speed $cur_pwm)%(${cur_pwm}) target=${NEW_SPEED}%(${target_pwm}) new=$(pwm_to_speed $gradual_pwm)%(${gradual_pwm})"
+	log_with_sensors "speed decrease: cur=$(pwm_to_speed $cur_pwm)%(${cur_pwm}) target=${NEW_SPEED}%(${target_pwm}) new=$(pwm_to_speed $gradual_pwm)%(${gradual_pwm})"
 	internal_set_pwm $gradual_pwm
 	LAST_APPLIED_SPEED=$gradual_speed
 	SENSOR_PWM=$gradual_pwm
