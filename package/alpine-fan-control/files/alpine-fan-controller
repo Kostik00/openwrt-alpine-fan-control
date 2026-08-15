@@ -19,16 +19,17 @@ function get_opt() {
 # max_temp  - upper curve point; above max_temp, fan runs at 100%
 # max_speed - fan speed (%) at max_temp (end of linear segment)
 #
-# temp_hyst - hysteresis (Celsius): fan off below (min_temp - temp_hyst);
-#             speed increases apply immediately; speed decreases apply only
-#             after temperature drops by temp_hyst since the last speed change
+# temp_hyst - hysteresis (Celsius): fan off below (min_temp - temp_hyst).
+#             Only applies to on/off transitions, not speed changes.
 # interval  - temperature polling interval (seconds)
 # debug     - log debug messages to syslog
 #
 # tmp_sens  - thermal zone type name (sysfs: thermal_zone*/type)
 # fan_cont  - hwmon device name (sysfs: hwmon*/name, pwm1 is used)
 #
-# drv_speed_min - minimum PWM (0-65535); if calculated PWM is below this, fan off
+# drv_speed_min - minimum PWM (0-65535); calculated values below this
+#                 are clamped to drv_speed_min (fan stays on at minimum).
+#                 Fan only turns off when temperature drops below (min_temp - temp_hyst).
 # drv_speed_max - PWM value for 100% speed (16-bit, 1-65535; default 255 for EMC230)
 # drv_speed_start - kickstart PWM when fan spins up from 0; also used for startup fan test
 #
@@ -36,10 +37,15 @@ function get_opt() {
 #              i2c bypasses kernel thermal PWM quantization on EMC230 when max_state=10. Requires i2c-tools.
 # i2c_bus, i2c_addr, i2c_reg - I2C path to Fan Drive Setting (AX9000: bus 0, 0x2f, 0x30)
 # disable_thermal - disable EMC2305 kernel thermal zones to prevent kernel from overwriting I2C PWM
-# At startup: PWM=drv_speed_start, verify fan RPM, then enter main loop (first interpolate after interval)
-# If startup test fails, or PWM>0 with RPM=0 for STARTUP_RPM_ATTEMPTS cycles: emergency mode -
-# PWM set to drv_speed_max and verified; if fan still does not spin, PWM=0
-# STARTUP_RPM_ATTEMPTS - RPM check attempts at startup/emergency test; also stall counter limit
+#
+# Speed control:
+#   - Speed increases: applied immediately (no delay)
+#   - Speed decreases: gradual, half the PWM difference each cycle
+#   - Fan off: only when T < (min_temp - temp_hyst), via force=1
+#
+# Startup: PWM=drv_speed_start, verify fan RPM, then enter main loop (first interpolate after interval)
+# Emergency: if startup test fails or PWM>0 with RPM=0 for STARTUP_RPM_ATTEMPTS cycles,
+#            PWM set to drv_speed_max; if fan still does not spin, PWM=0
 
 STARTUP_RPM_ATTEMPTS=5
 STARTUP_RPM_WAIT=1
@@ -278,7 +284,7 @@ function speed_to_pwm {
 
 	[ "$speed" -le 0 ] && { echo 0; return; }
 	value=$(( $DRV_SPEED_MAX * $speed / $CFG_SPEED_MAX ))
-	[ $value -lt $DRV_SPEED_MIN ] && { echo 0; return; }
+	[ $value -lt $DRV_SPEED_MIN ] && value=$DRV_SPEED_MIN
 	[ $value -gt $DRV_SPEED_MAX ] && value=$DRV_SPEED_MAX
 	[ $value -gt $PWM_MAX ] && value=$PWM_MAX
 	echo $value
@@ -429,17 +435,29 @@ function set_speed {
 		return
 	fi
 
-	# speed decrease: apply only after temperature drops by hysteresis
-	tmp=$TEMP_AT_LAST_SPEED_CHANGE
-	if [ -z "$tmp" ] || [ $(( TEMP + HYSTERESIS )) -le "$tmp" ]; then
-		log_with_sensors "speed decrease ${LAST_APPLIED_SPEED}% -> ${NEW_SPEED}% (PWM=$applied_pwm), last change at temp $tmp"
-		internal_set_speed $NEW_SPEED
-		LAST_APPLIED_SPEED=$EFFECTIVE
-		[ "$EFFECTIVE" != "$NEW_SPEED" ] && log_with_sensors "PWM below minimum, fan off instead of ${NEW_SPEED}% (PWM=$new_pwm)"
-		TEMP_AT_LAST_SPEED_CHANGE=$TEMP
-	else
-		log_with_sensors "speed decrease held by hysteresis, current ${LAST_APPLIED_SPEED}%, need temp <= $(( tmp - HYSTERESIS ))"
-	fi
+	# speed decrease: gradual (half the difference in PWM each cycle)
+	# hysteresis only applies to on/off, not speed changes
+	local cur_pwm=$SENSOR_PWM
+	local target_pwm=$( speed_to_pwm $NEW_SPEED )
+
+	# compare in PWM: skip if no actual decrease needed
+	[ "$cur_pwm" -le "$target_pwm" ] && return
+
+	# calculate half-step in PWM
+	local diff=$(( cur_pwm - target_pwm ))
+	local half=$(( diff / 2 ))
+	[ $half -lt 1 ] && return
+	local gradual_pwm=$(( cur_pwm - half ))
+	[ $gradual_pwm -lt $target_pwm ] && gradual_pwm=$target_pwm
+
+	# apply PWM, convert back to % only for LAST_APPLIED_SPEED
+	local gradual_speed=$( pwm_to_speed $gradual_pwm )
+		log_with_sensors "speed decrease: cur=$(pwm_to_speed $cur_pwm)%(${cur_pwm}) target=${NEW_SPEED}%(${target_pwm}) new=$(pwm_to_speed $gradual_pwm)%(${gradual_pwm})"
+	internal_set_pwm $gradual_pwm
+	LAST_APPLIED_SPEED=$gradual_speed
+	SENSOR_PWM=$gradual_pwm
+	TEMP_AT_LAST_SPEED_CHANGE=$TEMP
+	return
 }
 
 function set_speed_adv {
