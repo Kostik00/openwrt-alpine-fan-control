@@ -423,39 +423,44 @@ function set_speed {
 
 	[ "$EFFECTIVE" = "$LAST_APPLIED_SPEED" ] && [ "$SENSOR_PWM" = "$new_pwm" ] && return
 
-	# speed increase: apply immediately (no hysteresis)
-	if [ -z "$LAST_APPLIED_SPEED" ] || [ "$NEW_SPEED" -gt "$LAST_APPLIED_SPEED" ]; then
-		log_speed "speed increase: cur=$(pwm_to_speed $SENSOR_PWM)%($SENSOR_PWM) target=${NEW_SPEED}%($new_pwm) new=${NEW_SPEED}%($new_pwm)"
-		internal_set_speed $NEW_SPEED
-		LAST_APPLIED_SPEED=$EFFECTIVE
-		[ "$EFFECTIVE" != "$NEW_SPEED" ] && log_speed "speed increase: PWM below minimum, fan off"
+	# gradual speed change in PWM (both increase and decrease)
+	# dead band = 3 PWM (~1°C on curve) to prevent oscillation
+	local cur_pwm=$SENSOR_PWM
+	local target_pwm=$( speed_to_pwm $NEW_SPEED )
+
+	if [ "$cur_pwm" -lt "$target_pwm" ]; then
+		# speed increase: gradual
+		local diff=$(( target_pwm - cur_pwm ))
+		[ $diff -lt 3 ] && return
+		local half=$(( diff / 2 ))
+		[ $half -lt 3 ] && half=3
+		local gradual_pwm=$(( cur_pwm + half ))
+		[ $gradual_pwm -gt $target_pwm ] && gradual_pwm=$target_pwm
+		local gradual_speed=$( pwm_to_speed $gradual_pwm )
+		log_speed "speed increase: cur=$(pwm_to_speed $cur_pwm)%(${cur_pwm}) target=${NEW_SPEED}%(${target_pwm}) new=${gradual_speed}%(${gradual_pwm})"
+		internal_set_pwm $gradual_pwm
+		LAST_APPLIED_SPEED=$gradual_speed
+		SENSOR_PWM=$gradual_pwm
 		TEMP_AT_LAST_SPEED_CHANGE=$TEMP
 		return
 	fi
 
-	# speed decrease: gradual (half the difference in PWM each cycle)
-	# hysteresis only applies to on/off, not speed changes
-	local cur_pwm=$SENSOR_PWM
-	local target_pwm=$( speed_to_pwm $NEW_SPEED )
-
-	# compare in PWM: skip if no actual decrease needed
-	[ "$cur_pwm" -le "$target_pwm" ] && return
-
-	# calculate half-step in PWM
-	local diff=$(( cur_pwm - target_pwm ))
-	local half=$(( diff / 2 ))
-	[ $half -lt 1 ] && return
-	local gradual_pwm=$(( cur_pwm - half ))
-	[ $gradual_pwm -lt $target_pwm ] && gradual_pwm=$target_pwm
-
-	# apply PWM, convert back to % only for LAST_APPLIED_SPEED
-	local gradual_speed=$( pwm_to_speed $gradual_pwm )
-	log_speed "speed decrease: cur=$(pwm_to_speed $cur_pwm)%(${cur_pwm}) target=${NEW_SPEED}%(${target_pwm}) new=$(pwm_to_speed $gradual_pwm)%(${gradual_pwm})"
-	internal_set_pwm $gradual_pwm
-	LAST_APPLIED_SPEED=$gradual_speed
-	SENSOR_PWM=$gradual_pwm
-	TEMP_AT_LAST_SPEED_CHANGE=$TEMP
-	return
+	if [ "$cur_pwm" -gt "$target_pwm" ]; then
+		# speed decrease: gradual
+		local diff=$(( cur_pwm - target_pwm ))
+		[ $diff -lt 3 ] && return
+		local half=$(( diff / 2 ))
+		[ $half -lt 3 ] && half=3
+		local gradual_pwm=$(( cur_pwm - half ))
+		[ $gradual_pwm -lt $target_pwm ] && gradual_pwm=$target_pwm
+		local gradual_speed=$( pwm_to_speed $gradual_pwm )
+		log_speed "speed decrease: cur=$(pwm_to_speed $cur_pwm)%(${cur_pwm}) target=${NEW_SPEED}%(${target_pwm}) new=${gradual_speed}%(${gradual_pwm})"
+		internal_set_pwm $gradual_pwm
+		LAST_APPLIED_SPEED=$gradual_speed
+		SENSOR_PWM=$gradual_pwm
+		TEMP_AT_LAST_SPEED_CHANGE=$TEMP
+		return
+	fi
 }
 
 function set_speed_adv {
