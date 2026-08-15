@@ -71,6 +71,7 @@ I2C_BUS=$( get_opt i2c_bus 0 )
 I2C_ADDR=$( get_opt i2c_addr 0x2f )
 I2C_REG=$( get_opt i2c_reg 0x30 )
 DISABLE_THERMAL=$( get_opt disable_thermal 0 )
+HEARTBEAT_INTERVAL=$( get_opt heartbeat_interval 12 )
 CFG_SPEED_MAX=100
 PWM_MAX=65535
 
@@ -154,6 +155,10 @@ function sensor_status {
 
 function log_with_sensors {
 	log_debug "$1 ($(sensor_status))"
+}
+
+function log_speed {
+	logger "$LOGPREFIX: $1 ($(sensor_status))"
 }
 
 function check_fan_stall {
@@ -409,7 +414,7 @@ function set_speed {
 
 	if [ "$force" = "1" ]; then
 		[ "$EFFECTIVE" = "$LAST_APPLIED_SPEED" ] && [ "$SENSOR_PWM" = "$new_pwm" ] && return
-		log_with_sensors "speed forced: cur=$(pwm_to_speed $SENSOR_PWM)%($SENSOR_PWM) target=${NEW_SPEED}%($new_pwm) new=${NEW_SPEED}%($new_pwm)"
+		log_speed "speed forced: cur=$(pwm_to_speed $SENSOR_PWM)%($SENSOR_PWM) target=${NEW_SPEED}%($new_pwm) new=${NEW_SPEED}%($new_pwm)"
 		internal_set_speed $NEW_SPEED
 		LAST_APPLIED_SPEED=$EFFECTIVE
 		TEMP_AT_LAST_SPEED_CHANGE=$TEMP
@@ -418,16 +423,12 @@ function set_speed {
 
 	[ "$EFFECTIVE" = "$LAST_APPLIED_SPEED" ] && [ "$SENSOR_PWM" = "$new_pwm" ] && return
 
-	if [ "$DEBUG" = "1" ]; then
-		log_with_sensors "speed request: cur=$(pwm_to_speed $SENSOR_PWM)%($SENSOR_PWM) target=${NEW_SPEED}%($new_pwm)"
-	fi
-
 	# speed increase: apply immediately (no hysteresis)
 	if [ -z "$LAST_APPLIED_SPEED" ] || [ "$NEW_SPEED" -gt "$LAST_APPLIED_SPEED" ]; then
-		log_with_sensors "speed increase: cur=$(pwm_to_speed $SENSOR_PWM)%($SENSOR_PWM) target=${NEW_SPEED}%($new_pwm) new=${NEW_SPEED}%($new_pwm)"
+		log_speed "speed increase: cur=$(pwm_to_speed $SENSOR_PWM)%($SENSOR_PWM) target=${NEW_SPEED}%($new_pwm) new=${NEW_SPEED}%($new_pwm)"
 		internal_set_speed $NEW_SPEED
 		LAST_APPLIED_SPEED=$EFFECTIVE
-		[ "$EFFECTIVE" != "$NEW_SPEED" ] && log_with_sensors "speed increase: PWM below minimum, fan off"
+		[ "$EFFECTIVE" != "$NEW_SPEED" ] && log_speed "speed increase: PWM below minimum, fan off"
 		TEMP_AT_LAST_SPEED_CHANGE=$TEMP
 		return
 	fi
@@ -449,7 +450,7 @@ function set_speed {
 
 	# apply PWM, convert back to % only for LAST_APPLIED_SPEED
 	local gradual_speed=$( pwm_to_speed $gradual_pwm )
-	log_with_sensors "speed decrease: cur=$(pwm_to_speed $cur_pwm)%(${cur_pwm}) target=${NEW_SPEED}%(${target_pwm}) new=$(pwm_to_speed $gradual_pwm)%(${gradual_pwm})"
+	log_speed "speed decrease: cur=$(pwm_to_speed $cur_pwm)%(${cur_pwm}) target=${NEW_SPEED}%(${target_pwm}) new=$(pwm_to_speed $gradual_pwm)%(${gradual_pwm})"
 	internal_set_pwm $gradual_pwm
 	LAST_APPLIED_SPEED=$gradual_speed
 	SENSOR_PWM=$gradual_pwm
@@ -475,8 +476,6 @@ function set_speed_adv {
 function interpolate_speed {
 	read_sensors
 	local TEMP=$SENSOR_TEMP
-
-	log_with_sensors "sensors"
 
 	check_fan_stall || return
 
@@ -522,13 +521,20 @@ function reset_on_exit {
 # always try to reset fans on exit
 trap "reset_on_exit" SIGINT SIGTERM
 
+HEARTBEAT_COUNT=0
+
 function run_daemon {
 	while true; do
 		sleep $SLEEP_INTERVAL
+		HEARTBEAT_COUNT=$(( HEARTBEAT_COUNT + 1 ))
 		if [ "$EMERGENCY_MODE" = "1" ]; then
 			log_emergency_warning
 		else
 			interpolate_speed
+		fi
+		if [ "$HEARTBEAT_INTERVAL" -gt 0 ] && [ $HEARTBEAT_COUNT -ge $HEARTBEAT_INTERVAL ]; then
+			HEARTBEAT_COUNT=0
+			log_speed "status"
 		fi
 	done
 }

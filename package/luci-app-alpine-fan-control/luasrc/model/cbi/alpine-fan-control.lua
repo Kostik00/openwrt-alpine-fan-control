@@ -21,6 +21,7 @@ local defaults = {
 	drv_speed_max = "255",
 	pwm_method = "i2c",
 	disable_thermal = "0",
+	heartbeat_interval = "12",
 	i2c_bus = "0",
 	i2c_addr = "0x2f",
 	i2c_reg = "0x30",
@@ -223,6 +224,12 @@ disable_thermal = s:option(Flag, "disable_thermal", translate("Disable kernel th
 disable_thermal.default = defaults.disable_thermal
 disable_thermal.rmempty = false
 disable_thermal:depends("pwm_method", "i2c")
+
+heartbeat_interval = s:option(Value, "heartbeat_interval", translate("Heartbeat interval"),
+	translate("Status log interval in daemon loop cycles (0=disabled). Default 12 = ~60s at interval=5s."))
+heartbeat_interval.datatype = "range(0,1440)"
+heartbeat_interval.default = defaults.heartbeat_interval
+heartbeat_interval.rmempty = false
 
 i2c_bus = s:option(Value, "i2c_bus", translate("i2c_bus"), translate("I2C bus number (AX9000: 0)."))
 i2c_bus.datatype = "range(0,99)"

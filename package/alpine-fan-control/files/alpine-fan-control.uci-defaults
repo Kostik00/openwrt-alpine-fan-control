@@ -15,6 +15,7 @@ if [ -z "$fan_control" ]; then
 	uci set alpine-fan-control.@alpine-fan-control[0].drv_speed_max="255"
 	uci set alpine-fan-control.@alpine-fan-control[0].pwm_method="i2c"
 	uci set alpine-fan-control.@alpine-fan-control[0].disable_thermal="0"
+	uci set alpine-fan-control.@alpine-fan-control[0].heartbeat_interval="12"
 	uci set alpine-fan-control.@alpine-fan-control[0].i2c_bus="0"
 	uci set alpine-fan-control.@alpine-fan-control[0].i2c_addr="0x2f"
 	uci set alpine-fan-control.@alpine-fan-control[0].i2c_reg="0x30"
