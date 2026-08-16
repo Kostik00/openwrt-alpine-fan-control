@@ -158,7 +158,7 @@ function log_with_sensors {
 }
 
 function log_speed {
-	logger "$LOGPREFIX: $1 ($(sensor_status))"
+	log_debug "$1 ($(sensor_status))"
 }
 
 function check_fan_stall {
@@ -517,7 +517,7 @@ function run_daemon {
 		fi
 		if [ "$HEARTBEAT_INTERVAL" -gt 0 ] && [ $HEARTBEAT_COUNT -ge $HEARTBEAT_INTERVAL ]; then
 			HEARTBEAT_COUNT=0
-			log_speed "status"
+			logger "$LOGPREFIX: status ($(sensor_status))"
 		fi
 	done
 }
