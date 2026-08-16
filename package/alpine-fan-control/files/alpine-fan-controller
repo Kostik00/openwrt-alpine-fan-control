@@ -417,7 +417,7 @@ function set_speed {
 	[ $diff -lt 3 ] && return
 
 	local half=$(( diff / 2 ))
-	[ $half -lt 3 ] && half=3
+	[ $half -lt 2 ] && half=2
 
 	local gradual_pwm
 	if [ "$cur_pwm" -lt "$target_pwm" ]; then
