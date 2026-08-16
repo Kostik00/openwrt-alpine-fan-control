@@ -39,8 +39,8 @@ function get_opt() {
 # disable_thermal - disable EMC2305 kernel thermal zones to prevent kernel from overwriting I2C PWM
 #
 # Speed control:
-#   - Speed increases: applied immediately (no delay)
-#   - Speed decreases: gradual, half the PWM difference each cycle
+#   - Speed changes: gradual, half the PWM difference each cycle
+#   - Dead band = 3 PWM prevents oscillation at temperature boundaries
 #   - Fan off: only when T < (min_temp - temp_hyst), via force=1
 #
 # Startup: PWM=drv_speed_start, verify fan RPM, then enter main loop (first interpolate after interval)
@@ -295,15 +295,6 @@ function speed_to_pwm {
 	echo $value
 }
 
-function applied_speed {
-	local speed=$1
-	local pwm
-
-	pwm=$( speed_to_pwm $speed )
-	[ "$pwm" -eq 0 ] && { echo 0; return; }
-	echo $speed
-}
-
 function internal_set_pwm {
 	local value=$1
 	local requested=$value
@@ -398,69 +389,56 @@ function log_emergency_warning {
 	fi
 }
 
-function internal_set_speed {
-	internal_set_pwm $( speed_to_pwm $1 )
-}
-
 function set_speed {
 	local NEW_SPEED=$1
 	local interpolated=$2
 	local force=$3
 	local TEMP=$4
-	local EFFECTIVE new_pwm
 
-	EFFECTIVE=$( applied_speed $NEW_SPEED )
-	new_pwm=$( speed_to_pwm $NEW_SPEED )
+	local target_pwm=$( speed_to_pwm $NEW_SPEED )
 
 	if [ "$force" = "1" ]; then
-		[ "$EFFECTIVE" = "$LAST_APPLIED_SPEED" ] && [ "$SENSOR_PWM" = "$new_pwm" ] && return
-		log_speed "speed forced: cur=$(pwm_to_speed $SENSOR_PWM)%($SENSOR_PWM) target=${NEW_SPEED}%($new_pwm) new=${NEW_SPEED}%($new_pwm)"
-		internal_set_speed $NEW_SPEED
-		LAST_APPLIED_SPEED=$EFFECTIVE
+		[ "$SENSOR_PWM" = "$target_pwm" ] && return
+		log_speed "speed forced: cur=$(pwm_to_speed $SENSOR_PWM)%($SENSOR_PWM) target=${NEW_SPEED}%($target_pwm) new=${NEW_SPEED}%($target_pwm)"
+		internal_set_pwm $target_pwm
+		LAST_APPLIED_SPEED=$NEW_SPEED
 		TEMP_AT_LAST_SPEED_CHANGE=$TEMP
+		HEARTBEAT_COUNT=0
 		return
 	fi
 
-	[ "$EFFECTIVE" = "$LAST_APPLIED_SPEED" ] && [ "$SENSOR_PWM" = "$new_pwm" ] && return
+	local cur_pwm=$SENSOR_PWM
+	[ "$cur_pwm" = "$target_pwm" ] && return
 
 	# gradual speed change in PWM (both increase and decrease)
 	# dead band = 3 PWM (~1°C on curve) to prevent oscillation
-	local cur_pwm=$SENSOR_PWM
-	local target_pwm=$( speed_to_pwm $NEW_SPEED )
+	local diff=$(( target_pwm - cur_pwm ))
+	[ $diff -lt 0 ] && diff=$(( 0 - diff ))
+	[ $diff -lt 3 ] && return
 
+	local half=$(( diff / 2 ))
+	[ $half -lt 3 ] && half=3
+
+	local gradual_pwm
 	if [ "$cur_pwm" -lt "$target_pwm" ]; then
-		# speed increase: gradual
-		local diff=$(( target_pwm - cur_pwm ))
-		[ $diff -lt 3 ] && return
-		local half=$(( diff / 2 ))
-		[ $half -lt 3 ] && half=3
-		local gradual_pwm=$(( cur_pwm + half ))
+		gradual_pwm=$(( cur_pwm + half ))
 		[ $gradual_pwm -gt $target_pwm ] && gradual_pwm=$target_pwm
-		local gradual_speed=$( pwm_to_speed $gradual_pwm )
-		log_speed "speed increase: cur=$(pwm_to_speed $cur_pwm)%(${cur_pwm}) target=${NEW_SPEED}%(${target_pwm}) new=${gradual_speed}%(${gradual_pwm})"
-		internal_set_pwm $gradual_pwm
-		LAST_APPLIED_SPEED=$gradual_speed
-		SENSOR_PWM=$gradual_pwm
-		TEMP_AT_LAST_SPEED_CHANGE=$TEMP
-		return
+	else
+		gradual_pwm=$(( cur_pwm - half ))
+		[ $gradual_pwm -lt $target_pwm ] && gradual_pwm=$target_pwm
 	fi
 
-	if [ "$cur_pwm" -gt "$target_pwm" ]; then
-		# speed decrease: gradual
-		local diff=$(( cur_pwm - target_pwm ))
-		[ $diff -lt 3 ] && return
-		local half=$(( diff / 2 ))
-		[ $half -lt 3 ] && half=3
-		local gradual_pwm=$(( cur_pwm - half ))
-		[ $gradual_pwm -lt $target_pwm ] && gradual_pwm=$target_pwm
-		local gradual_speed=$( pwm_to_speed $gradual_pwm )
+	local gradual_speed=$( pwm_to_speed $gradual_pwm )
+	if [ "$cur_pwm" -lt "$target_pwm" ]; then
+		log_speed "speed increase: cur=$(pwm_to_speed $cur_pwm)%(${cur_pwm}) target=${NEW_SPEED}%(${target_pwm}) new=${gradual_speed}%(${gradual_pwm})"
+	else
 		log_speed "speed decrease: cur=$(pwm_to_speed $cur_pwm)%(${cur_pwm}) target=${NEW_SPEED}%(${target_pwm}) new=${gradual_speed}%(${gradual_pwm})"
-		internal_set_pwm $gradual_pwm
-		LAST_APPLIED_SPEED=$gradual_speed
-		SENSOR_PWM=$gradual_pwm
-		TEMP_AT_LAST_SPEED_CHANGE=$TEMP
-		return
 	fi
+	internal_set_pwm $gradual_pwm
+	LAST_APPLIED_SPEED=$gradual_speed
+	SENSOR_PWM=$gradual_pwm
+	TEMP_AT_LAST_SPEED_CHANGE=$TEMP
+	HEARTBEAT_COUNT=0
 }
 
 function set_speed_adv {
@@ -519,7 +497,7 @@ function interpolate_speed {
 
 function reset_on_exit {
 	echo "exiting, going to max fan speed for safety..."
-	internal_set_speed 100
+	internal_set_pwm $( speed_to_pwm 100 )
 	exit 0
 }
 
